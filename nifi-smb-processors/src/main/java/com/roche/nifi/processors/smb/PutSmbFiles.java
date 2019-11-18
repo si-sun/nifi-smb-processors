@@ -16,6 +16,8 @@
  */
 package com.roche.nifi.processors.smb;
 
+import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
@@ -59,11 +61,12 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.EnumSet;
 
-@Tags({"example"})
-@CapabilityDescription("Provide a description")
+@InputRequirement(Requirement.INPUT_REQUIRED)
+@Tags({"samba, smb, cifs, files, put"})
+@CapabilityDescription("Writes the contents of a FlowFile to a samba network location. " + 
+    "Use this processor instead of a cifs mounts if share access control is important.")
 @SeeAlso({})
-@ReadsAttributes({@ReadsAttribute(attribute="", description="")})
-@WritesAttributes({@WritesAttribute(attribute="", description="")})
+@ReadsAttributes({@ReadsAttribute(attribute="filename", description="The filename to use when writing the FlowFile to the network folder.")})
 public class PutSmbFiles extends AbstractProcessor {
     public static final String SHARE_ACCESS_NONE = "none";
     public static final String SHARE_ACCESS_READ = "read";
@@ -88,26 +91,26 @@ public class PutSmbFiles extends AbstractProcessor {
             .build();
     public static final PropertyDescriptor DIRECTORY = new PropertyDescriptor.Builder()
             .name("Directory")
-            .description("The network folder to which files should be written. You may use expression language")
+            .description("The network folder to which files should be written. You may use expression language.")
             .required(true)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
             .build();
     public static final PropertyDescriptor DOMAIN = new PropertyDescriptor.Builder()
             .name("Domain")
-            .description("The smb domain")
+            .description("The domain use for authentication")
             .required(false)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
     public static final PropertyDescriptor USERNAME = new PropertyDescriptor.Builder()
             .name("Username")
-            .description("The smb username")
+            .description("The username use for authentication")
             .required(false)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
     public static final PropertyDescriptor PASSWORD = new PropertyDescriptor.Builder()
             .name("Password")
-            .description("The smb password")
+            .description("The password use for authentication")
             .required(false)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .sensitive(true)
@@ -117,11 +120,12 @@ public class PutSmbFiles extends AbstractProcessor {
             .description("If true, then missing destination directories will be created. If false, flowfiles are penalized and sent to failure.")
             .required(true)
             .allowableValues("true", "false")
-            .defaultValue("true")
+            .defaultValue("false")
             .build();
     public static final PropertyDescriptor SHARE_ACCESS = new PropertyDescriptor.Builder()
             .name("Share Access Strategy")
-            .description("Indicates which permission other participants have on the file")
+            .description("Indicates which shared access are granted on the file during the write. " + 
+                "None is the most restrictive, but the safest setting to prevent corruption.")
             .required(true)
             .defaultValue(SHARE_ACCESS_NONE)
             .allowableValues(SHARE_ACCESS_NONE, SHARE_ACCESS_READ, SHARE_ACCESS_READDELETE, SHARE_ACCESS_READWRITEDELETE)
@@ -135,7 +139,7 @@ public class PutSmbFiles extends AbstractProcessor {
             .build();
     public static final PropertyDescriptor BATCH_SIZE = new PropertyDescriptor.Builder()
             .name("Batch Size")
-            .description("The maximum number of files to pull in each iteration")
+            .description("The maximum number of files to put in each iteration")
             .required(true)
             .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
             .defaultValue("100")
@@ -152,7 +156,9 @@ public class PutSmbFiles extends AbstractProcessor {
 
     private List<PropertyDescriptor> descriptors;
 
-    private Set<Relationship> relationships;    
+    private Set<Relationship> relationships;
+
+    private SMBClient smbClient = null;    
 
     @Override
     protected void init(final ProcessorInitializationContext context) {
@@ -173,6 +179,10 @@ public class PutSmbFiles extends AbstractProcessor {
         relationships.add(REL_SUCCESS);
         relationships.add(REL_FAILURE);
         this.relationships = Collections.unmodifiableSet(relationships);
+
+        if (this.smbClient == null) {
+            initSmbClient();
+        }
     }
 
     @Override
@@ -190,6 +200,14 @@ public class PutSmbFiles extends AbstractProcessor {
 
     }
 
+    public void initSmbClient() {
+        initSmbClient(new SMBClient());
+    }
+
+    public void initSmbClient(SMBClient smbClient) {
+        this.smbClient = smbClient;
+    }
+
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
         final int batchSize = context.getProperty(BATCH_SIZE).asInteger();
@@ -203,11 +221,23 @@ public class PutSmbFiles extends AbstractProcessor {
         final String hostname = context.getProperty(HOSTNAME).getValue();
         final String shareName = context.getProperty(SHARE).getValue();
 
-        SMBClient smbClient = new SMBClient();
-        AuthenticationContext ac = new AuthenticationContext(
-                context.getProperty(USERNAME).getValue(),
-                context.getProperty(PASSWORD).getValue().toCharArray(),
-                context.getProperty(DOMAIN).getValue());
+        final String domain = context.getProperty(DOMAIN).getValue();
+        final String username = context.getProperty(USERNAME).getValue();
+        String password = context.getProperty(PASSWORD).getValue();
+
+        AuthenticationContext ac = null;
+        if (username != null) {
+            if (password == null) {
+                password = "";
+            }
+            ac = new AuthenticationContext(
+                username,
+                password.toCharArray(),
+                domain);
+        } else {
+            ac = AuthenticationContext.anonymous();
+        }
+        
 
         // share access handling
         Set<SMB2ShareAccess> sharedAccess = Collections.<SMB2ShareAccess>emptySet();
